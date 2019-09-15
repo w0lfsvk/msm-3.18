@@ -35,6 +35,10 @@
 #include "pinctrl-msm.h"
 #include "../pinctrl-utils.h"
 
+#ifdef CONFIG_LGE_PM
+#include "linux/suspend.h"
+#endif
+
 #define MAX_NR_GPIO 300
 #define PS_HOLD_OFFSET 0x820
 #define TLMM_EBI2_EMMC_GPIO_CFG 0x111000
@@ -510,7 +514,9 @@ static void msm_gpio_dbg_show_one(struct seq_file *s,
 	int drive;
 	int pull;
 	u32 ctl_reg;
-
+#if defined (CONFIG_MACH_MSM8996_ELSA) || defined (CONFIG_MACH_MSM8996_LUCYE) || defined(CONFIG_MACH_MSM8996_ANNA) || defined (CONFIG_MACH_MSM8996_FALCON)
+	u32 val = 0 ;
+#endif
 	static const char * const pulls[] = {
 		"no pull",
 		"pull down",
@@ -520,7 +526,10 @@ static void msm_gpio_dbg_show_one(struct seq_file *s,
 
 	g = &pctrl->soc->groups[offset];
 	ctl_reg = readl(pctrl->regs + g->ctl_reg);
-
+#if defined (CONFIG_MACH_MSM8996_ELSA) || defined (CONFIG_MACH_MSM8996_LUCYE) || defined(CONFIG_MACH_MSM8996_ANNA) || defined (CONFIG_MACH_MSM8996_FALCON)
+	val = readl(pctrl->regs + g->io_reg);
+	val &= BIT(g->out_bit);
+#endif
 	is_out = !!(ctl_reg & BIT(g->oe_bit));
 	func = (ctl_reg >> g->mux_bit) & 7;
 	drive = (ctl_reg >> g->drv_bit) & 7;
@@ -529,8 +538,11 @@ static void msm_gpio_dbg_show_one(struct seq_file *s,
 	seq_printf(s, " %-8s: %-3s %d", g->name, is_out ? "out" : "in", func);
 	seq_printf(s, " %dmA", msm_regval_to_drive(drive));
 	seq_printf(s, " %s", pulls[pull]);
+#if defined (CONFIG_MACH_MSM8996_ELSA) || defined (CONFIG_MACH_MSM8996_LUCYE) || defined(CONFIG_MACH_MSM8996_ANNA) || defined (CONFIG_MACH_MSM8996_FALCON)
+	if ( is_out )
+	seq_printf(s, " %s", val ? "HIGH" : "LOW" );
+#endif
 }
-
 static void msm_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 {
 	unsigned gpio = chip->base;
@@ -820,6 +832,15 @@ bool msm_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
 		val = readl(pctrl->regs + g->intr_status_reg);
 		if (val & BIT(g->intr_status_bit)) {
 			irq_pin = irq_find_mapping(gc->irqdomain, i);
+#ifdef CONFIG_LGE_PM
+			if (suspend_debug_irq_pin())
+				printk("%s : irq_pin = %d, GPIO[%d], "
+					"g->intr_status_reg = %u, "
+					"g->intr_cfg_reg = %u\n",
+					__func__, irq_pin,
+					i, val,
+					readl(pctrl->regs + g->intr_cfg_reg));
+#endif
 			handled += generic_handle_irq(irq_pin);
 		}
 	}
@@ -872,24 +893,11 @@ static int msm_gpio_init(struct msm_pinctrl *pctrl)
 		return ret;
 	}
 
-	/*
-	 * For DeviceTree-supported systems, the gpio core checks the
-	 * pinctrl's device node for the "gpio-ranges" property.
-	 * If it is present, it takes care of adding the pin ranges
-	 * for the driver. In this case the driver can skip ahead.
-	 *
-	 * In order to remain compatible with older, existing DeviceTree
-	 * files which don't set the "gpio-ranges" property or systems that
-	 * utilize ACPI the driver has to call gpiochip_add_pin_range().
-	 */
-	if (!of_property_read_bool(pctrl->dev->of_node, "gpio-ranges")) {
-		ret = gpiochip_add_pin_range(&pctrl->chip,
-			dev_name(pctrl->dev), 0, 0, chip->ngpio);
-		if (ret) {
-			dev_err(pctrl->dev, "Failed to add pin range\n");
-			gpiochip_remove(&pctrl->chip);
-			return ret;
-		}
+	ret = gpiochip_add_pin_range(&pctrl->chip, dev_name(pctrl->dev), 0, 0, chip->ngpio);
+	if (ret) {
+		dev_err(pctrl->dev, "Failed to add pin range\n");
+		gpiochip_remove(&pctrl->chip);
+		return ret;
 	}
 
 	ret = gpiochip_irqchip_add(chip,

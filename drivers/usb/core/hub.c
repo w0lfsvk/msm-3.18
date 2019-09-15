@@ -36,6 +36,17 @@
 #define USB_VENDOR_GENESYS_LOGIC		0x05e3
 #define HUB_QUIRK_CHECK_PORT_AUTOSUSPEND	0x01
 
+#ifdef CONFIG_LGE_ALICE_FRIENDS
+bool alice_friends_hm;
+bool alice_friends_hm_earjack;
+#endif
+
+#ifdef CONFIG_LGE_DP_ANX7688
+unsigned int det_vendor_id;
+unsigned int det_product_id;
+#define APPLE_VID	0x05ac
+#define APPLE_PID	0x100e
+#endif
 /* Protect struct usb_device->state and ->children members
  * Note: Both are also protected by ->dev.sem, except that ->state can
  * change to USB_STATE_NOTATTACHED even when the semaphore isn't held. */
@@ -1019,6 +1030,9 @@ int usb_remove_device(struct usb_device *udev)
 	set_bit(udev->portnum, hub->removed_bits);
 	hub_port_logical_disconnect(hub, udev->portnum);
 	usb_autopm_put_interface(intf);
+#ifdef CONFIG_LGE_DP_ANX7688
+	det_vendor_id = det_product_id = 0x0000;
+#endif
 	return 0;
 }
 
@@ -1045,8 +1059,11 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 		device_lock(hub->intfdev);
 
 		/* Was the hub disconnected while we were waiting? */
-		if (hub->disconnected)
-			goto disconnected;
+		if (hub->disconnected) {
+			device_unlock(hub->intfdev);
+			kref_put(&hub->kref, hub_release);
+			return;
+		}
 		if (type == HUB_INIT2)
 			goto init2;
 		goto init3;
@@ -1162,16 +1179,6 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 						   USB_PORT_FEAT_ENABLE);
 		}
 
-		/*
-		 * Add debounce if USB3 link is in polling/link training state.
-		 * Link will automatically transition to Enabled state after
-		 * link training completes.
-		 */
-		if (hub_is_superspeed(hdev) &&
-		    ((portstatus & USB_PORT_STAT_LINK_STATE) ==
-						USB_SS_PORT_LS_POLLING))
-			need_debounce_delay = true;
-
 		/* Clear status-change flags; we'll debounce later */
 		if (portchange & USB_PORT_STAT_C_CONNECTION) {
 			need_debounce_delay = true;
@@ -1278,12 +1285,12 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 	/* Scan all ports that need attention */
 	kick_hub_wq(hub);
 
-	if (type == HUB_INIT2 || type == HUB_INIT3) {
-		/* Allow autosuspend if it was suppressed */
- disconnected:
+	/* Allow autosuspend if it was suppressed */
+	if (type <= HUB_INIT3)
 		usb_autopm_put_interface_async(to_usb_interface(hub->intfdev));
+
+	if (type == HUB_INIT2 || type == HUB_INIT3)
 		device_unlock(hub->intfdev);
-	}
 
 	kref_put(&hub->kref, hub_release);
 }
@@ -1573,8 +1580,17 @@ static int hub_configure(struct usb_hub *hub,
 			dev_warn(hub_dev,
 					"insufficient power available "
 					"to use all downstream ports\n");
+#ifdef CONFIG_LGE_USB_G_ANDROID
+		/*We don't need to allow unit_load each port,
+		 * allow that remaining variable current divide by maxchild.
+		 */
+		if (maxchild == 0 || remaining < unit_load)
+			hub->mA_per_port = unit_load;
+		else
+			hub->mA_per_port = remaining / maxchild;
+#else
 		hub->mA_per_port = unit_load;	/* 7.2.1 */
-
+#endif
 	} else {	/* Self-powered external hub */
 		/* FIXME: What about battery-powered external hubs that
 		 * provide less current per port? */
@@ -2158,6 +2174,17 @@ void usb_disconnect(struct usb_device **pdev)
 	struct usb_hub *hub = NULL;
 	int port1 = 1;
 
+#ifdef CONFIG_LGE_ALICE_FRIENDS
+	if (udev->product) {
+	       if (!strcmp(udev->product, "HM")) {
+		       if (IS_ALICE_FRIENDS_HM_ON())
+			       alice_friends_hm_reset();
+
+		       alice_friends_hm_earjack = false;
+	       }
+	}
+#endif
+
 	/* mark the device as inactive, so any further urb submissions for
 	 * this device (and any of its children) will fail immediately.
 	 * this quiesces everything except pending urbs.
@@ -2165,12 +2192,6 @@ void usb_disconnect(struct usb_device **pdev)
 	usb_set_device_state(udev, USB_STATE_NOTATTACHED);
 	dev_info(&udev->dev, "USB disconnect, device number %d\n",
 			udev->devnum);
-
-	/*
-	 * Ensure that the pm runtime code knows that the USB device
-	 * is in the process of being disconnected.
-	 */
-	pm_runtime_barrier(&udev->dev);
 
 	usb_lock_device(udev);
 
@@ -2253,6 +2274,17 @@ static void announce_device(struct usb_device *udev)
 static inline void announce_device(struct usb_device *udev) { }
 #endif
 
+#ifdef CONFIG_LGE_DP_ANX7688
+bool get_device_apple_pid(void)
+{
+	if (det_vendor_id == APPLE_VID &&
+			det_product_id == APPLE_PID)
+		return true;
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(get_device_apple_pid);
+#endif
 
 /**
  * usb_enumerate_device_otg - FIXME (usbcore-internal)
@@ -2281,8 +2313,7 @@ static int usb_enumerate_device_otg(struct usb_device *udev)
 		/* descriptor may appear anywhere in config */
 		if (__usb_get_extra_descriptor (udev->rawdescriptors[0],
 					le16_to_cpu(udev->config[0].desc.wTotalLength),
-					USB_DT_OTG, (void **) &desc,
-					sizeof(*desc)) == 0) {
+					USB_DT_OTG, (void **) &desc) == 0) {
 			if (desc->bmAttributes & USB_OTG_HNP) {
 				unsigned		port1 = udev->portnum;
 
@@ -2481,7 +2512,12 @@ int usb_new_device(struct usb_device *udev)
 
 	/* Tell the world! */
 	announce_device(udev);
-
+#ifdef CONFIG_LGE_DP_ANX7688
+	if (udev->speed == USB_SPEED_SUPER) {
+		det_vendor_id = le16_to_cpu(udev->descriptor.idVendor);
+		det_product_id = le16_to_cpu(udev->descriptor.idProduct);
+	}
+#endif
 	if (udev->serial)
 		add_device_randomness(udev->serial, strlen(udev->serial));
 	if (udev->product)
@@ -2689,8 +2725,15 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 		if (ret < 0)
 			return ret;
 
-		/* The port state is unknown until the reset completes. */
-		if (!(portstatus & USB_PORT_STAT_RESET))
+		/*
+		 * The port state is unknown until the reset completes.
+		 *
+		 * On top of that, some chips may require additional time
+		 * to re-establish a connection after the reset is complete,
+		 * so also wait for the connection to be re-established.
+		 */
+		if (!(portstatus & USB_PORT_STAT_RESET) &&
+		    (portstatus & USB_PORT_STAT_CONNECTION))
 			break;
 
 		/* switch to the long delay after two short delay failures */
@@ -2801,9 +2844,7 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 					USB_PORT_FEAT_C_BH_PORT_RESET);
 			usb_clear_port_feature(hub->hdev, port1,
 					USB_PORT_FEAT_C_PORT_LINK_STATE);
-
-			if (udev)
-				usb_clear_port_feature(hub->hdev, port1,
+			usb_clear_port_feature(hub->hdev, port1,
 					USB_PORT_FEAT_C_CONNECTION);
 
 			/*

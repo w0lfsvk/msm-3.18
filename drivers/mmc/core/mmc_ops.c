@@ -57,6 +57,10 @@ int mmc_send_status(struct mmc_card *card, u32 *status)
 	return __mmc_send_status(card, status, false);
 }
 
+#ifdef CONFIG_MACH_LGE
+EXPORT_SYMBOL(mmc_send_status);
+#endif
+
 static int mmc_switch_status_error(struct mmc_host *host, u32 status)
 {
 	if (mmc_host_is_spi(host)) {
@@ -555,7 +559,7 @@ int __mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
 		timeout_ms = MMC_OPS_TIMEOUT_MS;
 
 	/* Must check status to be sure of no errors. */
-	timeout = jiffies + msecs_to_jiffies(timeout_ms) + 1;
+	timeout = jiffies + msecs_to_jiffies(timeout_ms);
 	do {
 		if (send_status) {
 			err = __mmc_send_status(card, &status, ignore_crc);
